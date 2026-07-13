@@ -1499,7 +1499,15 @@ class APICache:
         try:
             result = fetch_fn(endpoint)
             with self._lock:
-                self._cache[endpoint] = result
+                # Don't cache a failed fetch. A None here means gh_api exhausted
+                # its retries (a rate limit that outlasted the backoff) or hit a
+                # hard error; caching it would freeze "no data" in place for
+                # every other user who shares this item, silently dropping their
+                # real activity. Worse, the on-disk report cache would then bake
+                # that gap in for the whole week. Leaving it uncached lets a
+                # later access retry the endpoint.
+                if result is not None:
+                    self._cache[endpoint] = result
                 pending_event = self._pending.pop(endpoint, None)
             if pending_event:
                 pending_event.set()
