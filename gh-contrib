@@ -1628,7 +1628,12 @@ def fetch_additional_interactions(item: dict, username: str, since: datetime, un
             ]
             # Filter by date and find latest
             for review in user_reviews:
-                review_dt = parse_datetime(review["submitted_at"])
+                # A PENDING review was started but never submitted, so it carries
+                # no submission timestamp; skip it rather than crash parsing None.
+                submitted_at = review.get("submitted_at")
+                if not submitted_at:
+                    continue
+                review_dt = parse_datetime(submitted_at)
                 if since <= review_dt <= until:
                     if "reviewer" not in interactions:
                         interactions.append("reviewer")
