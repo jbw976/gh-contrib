@@ -34,13 +34,13 @@ setup:
 
 # Show Crossplane control-planes team activity for the last complete week
 control-planes-last-week:
-	$(PYTHON) ./gh-contrib --username jeanduplessis,phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --last-week
+	$(PYTHON) ./gh-contrib --username phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --last-week
 
 control-planes-last-week-debug:
-	$(PYTHON) ./gh-contrib --username jeanduplessis,phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --last-week --debug
+	$(PYTHON) ./gh-contrib --username phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --last-week --debug
 
 control-planes-trends:
-	$(PYTHON) ./gh-contrib --username jeanduplessis,phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --trend --weeks 5
+	$(PYTHON) ./gh-contrib --username phisco,jbw976,haarchri,adamwg,negz,ezgidemirel,lsviben --org crossplane,crossplane-contrib --trend --weeks 5
 
 # Health mode targets for repository health analysis
 health-crossplane:
