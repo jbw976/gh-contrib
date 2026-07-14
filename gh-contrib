@@ -346,16 +346,34 @@ def parse_datetime(dt_str: str) -> datetime:
     return datetime.fromisoformat(dt_str)
 
 
-def get_interaction_details(item: dict, username: str, since: datetime, until: datetime) -> tuple[list[str], Optional[datetime]]:
-    """Determine how the user interacted with this issue/PR and when."""
+def latest_activity(*pairs: Optional[tuple[datetime, str]]) -> Optional[tuple[datetime, str]]:
+    """Pick the most recent (timestamp, description) activity, ignoring Nones.
+
+    We track a user's newest active interaction regardless of the date window so
+    a filtered item can explain itself as "commented, but outside the window"
+    rather than just disappearing into the passive bucket.
+    """
+    present = [p for p in pairs if p is not None]
+    return max(present, key=lambda p: p[0]) if present else None
+
+
+def get_interaction_details(item: dict, username: str, since: datetime, until: datetime) -> tuple[list[str], Optional[datetime], Optional[tuple[datetime, str]]]:
+    """Determine how the user interacted with this issue/PR and when.
+
+    Returns the in-window interactions, the latest in-window interaction
+    timestamp, and the latest active interaction of any date (used to explain
+    why an item was filtered out).
+    """
     interactions = []
     latest_interaction: Optional[datetime] = None
+    latest_any: Optional[tuple[datetime, str]] = None
     username_lower = username.lower()
 
     # Check if user is author (only count if created within date range)
     if item.get("author", {}).get("login", "").lower() == username_lower:
         if created_at := item.get("createdAt"):
             created_dt = parse_datetime(created_at)
+            latest_any = latest_activity(latest_any, (created_dt, "authored"))
             if since <= created_dt <= until:
                 interactions.append("author")
                 if latest_interaction is None or created_dt > latest_interaction:
@@ -366,7 +384,7 @@ def get_interaction_details(item: dict, username: str, since: datetime, until: d
     if any(a.get("login", "").lower() == username_lower for a in assignees):
         interactions.append("assignee")
 
-    return interactions, latest_interaction
+    return interactions, latest_interaction, latest_any
 
 
 def _fetch_all_pages(endpoint_base: str) -> list:
@@ -396,13 +414,14 @@ def _fetch_all_pages(endpoint_base: str) -> list:
     return all_results
 
 
-def fetch_additional_interactions(item: dict, username: str, since: datetime, until: datetime) -> tuple[list[str], Optional[datetime]]:
+def fetch_additional_interactions(item: dict, username: str, since: datetime, until: datetime) -> tuple[list[str], Optional[datetime], Optional[tuple[datetime, str]]]:
     """Fetch additional interaction details from API (comments, reviews) with timestamps.
 
     Fetches all pages of comments and reviews to ensure complete data.
     """
     interactions = []
     latest_interaction: Optional[datetime] = None
+    latest_any: Optional[tuple[datetime, str]] = None
     username_lower = username.lower()
     repo = item["repository"]["nameWithOwner"]
     number = item["number"]
@@ -417,6 +436,7 @@ def fetch_additional_interactions(item: dict, username: str, since: datetime, un
         # Filter by date and find latest
         for comment in user_comments:
             comment_dt = parse_datetime(comment["created_at"])
+            latest_any = latest_activity(latest_any, (comment_dt, "commented"))
             if since <= comment_dt <= until:
                 if "commenter" not in interactions:
                     interactions.append("commenter")
@@ -439,19 +459,20 @@ def fetch_additional_interactions(item: dict, username: str, since: datetime, un
                 if not submitted_at:
                     continue
                 review_dt = parse_datetime(submitted_at)
+                latest_any = latest_activity(latest_any, (review_dt, "reviewed"))
                 if since <= review_dt <= until:
                     if "reviewer" not in interactions:
                         interactions.append("reviewer")
                     if latest_interaction is None or review_dt > latest_interaction:
                         latest_interaction = review_dt
 
-    return interactions, latest_interaction
+    return interactions, latest_interaction, latest_any
 
 
 def process_item(item: dict, username: str, since: datetime, until: datetime) -> dict:
     """Process a single item to get all interaction details."""
-    interactions, latest_basic_interaction = get_interaction_details(item, username, since, until)
-    additional, latest_additional_interaction = fetch_additional_interactions(item, username, since, until)
+    interactions, latest_basic_interaction, basic_any = get_interaction_details(item, username, since, until)
+    additional, latest_additional_interaction, additional_any = fetch_additional_interactions(item, username, since, until)
     interactions.extend(additional)
 
     # Determine the latest interaction timestamp
@@ -460,12 +481,17 @@ def process_item(item: dict, username: str, since: datetime, until: datetime) ->
         default=None
     )
 
+    # Newest active interaction of any date, so a filtered item can say "acted,
+    # but outside the window" instead of a bare "mentioned".
+    latest_any = latest_activity(basic_any, additional_any)
+
     # If no specific interaction found, mark as "mentioned" (catch-all for involves)
     if not interactions:
         interactions.append("mentioned")
 
     item["_interactions"] = interactions
     item["_latest_interaction"] = latest_interaction
+    item["_latest_any"] = latest_any
     return item
 
 
@@ -498,8 +524,12 @@ def escape_markdown(text: str) -> str:
     return result
 
 
-def format_table_row(item: dict) -> str:
-    """Format an issue/PR item as a markdown table row."""
+def format_table_row(item: dict, reason: Optional[str] = None) -> str:
+    """Format an issue/PR item as a markdown table row.
+
+    When reason is provided, appends it as an extra trailing column, which the
+    filtered-items section uses to explain each exclusion.
+    """
     state = item["state"]
     item_type = "PR" if is_pull_request(item) else "Issue"
     interactions = ", ".join(item.get("_interactions", []))
@@ -508,17 +538,22 @@ def format_table_row(item: dict) -> str:
     if len(title) > TITLE_TRUNCATE_LENGTH:
         title = title[:TITLE_TRUNCATE_LENGTH - 3] + "..."
     url = item["url"]
-    return f"| {item_type} | {state} | [{title}]({url}) | {interactions} |"
+    row = f"| {item_type} | {state} | [{title}]({url}) | {interactions} |"
+    if reason is not None:
+        row += f" {escape_markdown(reason)} |"
+    return row
 
 
 def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime, end_dt: datetime) -> dict:
     """Process an item for multiple users and combine their interactions."""
     all_interactions = []
     latest_interaction = None
+    latest_any: Optional[tuple[datetime, str]] = None
     for username in item.get("_usernames", []):
         processed = process_item(item.copy(), username, since_dt, end_dt)
         interactions = processed.get("_interactions", [])
         item_latest = processed.get("_latest_interaction")
+        item_any = processed.get("_latest_any")
         # Tag interactions with username if multiple users
         if len(usernames) > 1:
             for interaction in interactions:
@@ -531,8 +566,16 @@ def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime,
                     all_interactions.append(interaction)
         if item_latest and (latest_interaction is None or item_latest > latest_interaction):
             latest_interaction = item_latest
+        # Merge each user's any-date activity, tagging the description with the
+        # user when several are in play so the filter reason names who acted.
+        if item_any is not None:
+            dt, desc = item_any
+            if len(usernames) > 1:
+                desc = f"{desc} (@{username})"
+            latest_any = latest_activity(latest_any, (dt, desc))
     item["_interactions"] = all_interactions
     item["_latest_interaction"] = latest_interaction
+    item["_latest_any"] = latest_any
     return item
 
 
@@ -572,6 +615,27 @@ def compute_user_stats(active_items: list[dict], usernames: list[str]) -> dict[s
                     user_stats[username].issues_commented += 1
 
     return user_stats
+
+
+def derive_filter_reason(item: dict, base_interactions: set[str], since_dt: datetime, end_dt: datetime) -> str:
+    """Explain why an item landed in the filtered set rather than active results.
+
+    We only get here when the user had no active (author/commenter/reviewer)
+    interaction inside the date window. Report the most specific thing we can:
+    they acted but every action fell outside the window; they're only an
+    assignee; or the involves search matched them with nothing attributable.
+    """
+    latest_any = item.get("_latest_any")
+    if latest_any is not None:
+        # They did actively engage, just never inside the window: an in-window
+        # action would have made the item active, so this timestamp is always
+        # outside it. Most useful explanation, so it beats the passive buckets.
+        dt, desc = latest_any
+        side = "before" if dt < since_dt else "after"
+        return f"{desc} {dt:%Y-%m-%d}, {side} window"
+    if "assignee" in base_interactions:
+        return "assignee only (no comments, reviews, or authorship)"
+    return "mentioned only (matched by involves search, no attributable activity)"
 
 
 def fetch_activity(
@@ -660,6 +724,7 @@ def fetch_activity(
         if not is_passive_only and has_recent_interaction:
             active_items.append(item)
         else:
+            item["_filter_reason"] = derive_filter_reason(item, base_interactions, since_dt, end_dt)
             filtered_items.append(item)
 
     # Sort by latest user interaction descending
@@ -872,7 +937,7 @@ def print_summary_table(user_stats: dict[str, UserStats]) -> None:
 def print_filtered_items(filtered_items: list[dict]) -> None:
     """Print the filtered items section."""
     print(f"\n## Filtered Out ({len(filtered_items)} items)\n")
-    print("Items with only passive interactions (review-requested, assignee, mentioned) or no recent activity:\n")
+    print("Items where the user had no active participation (author, commenter, or reviewer) inside the date range. The Reason column explains each exclusion:\n")
 
     # Group filtered by repository
     filtered_by_repo = group_by_repository(filtered_items)
@@ -880,10 +945,10 @@ def print_filtered_items(filtered_items: list[dict]) -> None:
     for repo_name in sorted(filtered_by_repo.keys()):
         repo_items = filtered_by_repo[repo_name]
         print(f"\n### {repo_name} ({len(repo_items)} items)\n")
-        print("| Type | State | Title | Interactions |")
-        print("|------|-------|-------|--------------|")
+        print("| Type | State | Title | Interactions | Reason |")
+        print("|------|-------|-------|--------------|--------|")
         for item in repo_items:
-            print(format_table_row(item))
+            print(format_table_row(item, reason=item.get("_filter_reason", "")))
 
 
 def main() -> None:
