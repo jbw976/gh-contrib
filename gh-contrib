@@ -180,11 +180,27 @@ def gh_search(args: list[str]) -> list[dict]:
         sys.exit(1)
 
 
+# Endpoints whose fetch failed after all retries. A non-empty list means the
+# run is degraded: we couldn't read some item's comments or reviews, so the
+# activity counts may undercount. main() surfaces this loudly and exits
+# non-zero rather than let a partial report pass for a complete one.
+_api_failures: list[str] = []
+_api_failures_lock = threading.Lock()
+
+
+def _record_api_failure(endpoint: str, reason: str) -> None:
+    """Note a fetch that could not be completed, for the end-of-run warning."""
+    with _api_failures_lock:
+        _api_failures.append(f"{endpoint} ({reason})")
+
+
 def gh_api(endpoint: str) -> Optional[list | dict]:
     """Execute a GitHub API call using gh CLI with retry and exponential backoff.
 
     Retries on rate limits, server errors (502, 503, 504), and timeouts.
-    Returns the parsed JSON response, or None on error.
+    Returns the parsed JSON response, or None on error. Every giving-up path
+    records the failure via _record_api_failure so the run can be flagged as
+    degraded rather than silently undercount; see main().
     """
     cmd = ["gh", "api", endpoint]
     delay = INITIAL_RETRY_DELAY
@@ -199,7 +215,7 @@ def gh_api(endpoint: str) -> Optional[list | dict]:
                 time.sleep(delay)
                 delay *= BACKOFF_FACTOR
                 continue
-            print(f"Warning: API call timed out after {MAX_RETRIES} retries: {endpoint}", file=sys.stderr)
+            _record_api_failure(endpoint, f"timed out after {MAX_RETRIES} retries")
             return None
         except subprocess.CalledProcessError as e:
             stderr_lower = e.stderr.lower() if e.stderr else ""
@@ -214,12 +230,14 @@ def gh_api(endpoint: str) -> Optional[list | dict]:
                 delay *= BACKOFF_FACTOR
                 continue
 
-            if "rate limit" in stderr_lower:
-                print(f"Warning: GitHub API rate limit exhausted: {endpoint}", file=sys.stderr)
+            reason = "rate limit exhausted" if "rate limit" in stderr_lower else (e.stderr.strip() if e.stderr else "gh api error")
+            _record_api_failure(endpoint, reason)
             return None
         except json.JSONDecodeError:
+            _record_api_failure(endpoint, "invalid JSON in response")
             return None
 
+    _record_api_failure(endpoint, "unknown error")
     return None
 
 
@@ -888,18 +906,32 @@ def main() -> None:
 
     if not result.active_items and not result.filtered_items:
         print("No activity found.")
-        return
+    else:
+        # Print detailed results (only in debug mode)
+        if args.debug:
+            print_detailed_results(result.active_items, result.filtered_items, usernames)
 
-    # Print detailed results (only in debug mode)
-    if args.debug:
-        print_detailed_results(result.active_items, result.filtered_items, usernames)
+        # Print summary table
+        print_summary_table(result.user_stats)
 
-    # Print summary table
-    print_summary_table(result.user_stats)
+        # Show filtered items if requested
+        if args.show_filtered and result.filtered_items:
+            print_filtered_items(result.filtered_items)
 
-    # Show filtered items if requested
-    if args.show_filtered and result.filtered_items:
-        print_filtered_items(result.filtered_items)
+    # If any fetch failed after its retries, the counts may undercount real
+    # activity. Say so loudly and exit non-zero rather than let a partial run
+    # pass for a complete one. This is checked even when nothing was found,
+    # since a fully failed run also looks empty.
+    if _api_failures:
+        print(
+            f"\nWARNING: {len(_api_failures)} API fetch(es) failed after retries; "
+            "the numbers above may undercount activity. Re-run to get complete counts.",
+            file=sys.stderr,
+        )
+        if args.debug:
+            for failure in _api_failures:
+                print(f"  failed: {failure}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
