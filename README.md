@@ -23,6 +23,9 @@ Track GitHub contributions across users and organizations.
 # Multiple users and orgs
 ./gh-contrib -u user1,user2 -o org1,org2 --days 14
 
+# Count every Renovate review (the filter is on by default)
+./gh-contrib -u username -o myorg --no-filter-renovate
+
 # Using Makefile shortcuts
 make help
 make control-planes-last-week
@@ -36,6 +39,7 @@ make control-planes-last-week
 - `-e, --end-date` - End date for search window (YYYY-MM-DD)
 - `--last-week` - Search last complete week
 - `--show-filtered` - Show filtered items with passive interactions
+- `--filter-renovate` / `--no-filter-renovate` - Filter out drive-by reviews of Renovate PRs (on by default)
 
 ## Output
 
@@ -43,6 +47,12 @@ Results are grouped by repository and displayed in markdown tables, with a summa
 
 - PRs authored, reviewed, commented
 - Issues authored, commented
+
+## Filtering Renovate PRs
+
+By default, reviews and approvals of [Renovate](https://github.com/apps/renovate) dependency-bump PRs are filtered out, so rubber-stamping a stream of automated bumps doesn't inflate a contributor's numbers. A review is kept only when the contributor did real work on the PR: pushed a commit of their own, or left a comment longer than one line. The message typed into a review approval doesn't count as a comment here. Only standalone PR comments do.
+
+Renovate PRs are spotted by their author (`renovate[bot]`) at no extra API cost. Pass `--no-filter-renovate` to turn the filter off and count every Renovate review.
 
 ## How It Works
 
