@@ -32,6 +32,12 @@ SUBPROCESS_TIMEOUT = 30  # seconds
 MAX_PAGINATION_PAGES = 10  # Safety limit for pagination
 PASSIVE_INTERACTION_TYPES = frozenset({"review-requested", "assignee", "mentioned"})
 
+# PR authors we treat as dependency-bump bots. Under --filter-renovate, a
+# contributor's review or comment on one of these PRs is filtered out unless they
+# did real work on it: pushed a commit or left a multi-line comment (see
+# fetch_commit_authors and fetch_substantive_commenters).
+BOT_PR_AUTHORS = frozenset({"renovate[bot]"})
+
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1.0  # seconds
@@ -130,6 +136,18 @@ def is_pull_request(item: dict) -> bool:
         or item["state"] == "MERGED"
         or "/pull/" in item["url"]
     )
+
+
+def is_renovate_pr(item: dict) -> bool:
+    """Report whether this PR was opened by a dependency-bump bot (e.g. Renovate).
+
+    Keys off the PR author login already in the search results, so it costs no
+    API call. Issues are never bumps, so non-PRs are always False.
+    """
+    if not is_pull_request(item):
+        return False
+    author = (item.get("author") or {}).get("login", "")
+    return author.lower() in BOT_PR_AUTHORS
 
 
 def parse_interaction(interaction: str, default_username: Optional[str] = None) -> tuple[str, Optional[str]]:
@@ -414,6 +432,60 @@ def _fetch_all_pages(endpoint_base: str) -> list:
     return all_results
 
 
+def fetch_commit_authors(item: dict, since: datetime, until: datetime) -> set[str]:
+    """Return the lowercased logins who authored an in-window commit on this PR.
+
+    The --filter-renovate path uses this to tell a rubber-stamp review apart from
+    real work: if a contributor authored a commit on the bump PR inside the date
+    window, their review is kept rather than filtered. Commits from outside the
+    window don't count, since the report credits work done in this period only.
+    """
+    repo = item["repository"]["nameWithOwner"]
+    number = item["number"]
+    commits = _fetch_all_pages(f"repos/{repo}/pulls/{number}/commits")
+    authors = set()
+    for commit in commits:
+        # Top-level `author` is the GitHub user (login); the nested commit.author
+        # carries the git authoring date. A human who pushes to a Renovate PR
+        # shows up as the author even when the web UI records web-flow as the
+        # committer. Either can be null, hence the `or {}` guards.
+        login = (commit.get("author") or {}).get("login")
+        date_str = (commit.get("commit", {}).get("author") or {}).get("date")
+        if not login or not date_str:
+            continue
+        if since <= parse_datetime(date_str) <= until:
+            authors.add(login.lower())
+    return authors
+
+
+def fetch_substantive_commenters(item: dict, since: datetime, until: datetime) -> set[str]:
+    """Return the lowercased logins who left an in-window multi-line comment here.
+
+    A one-line "LGTM" is a drive-by; a comment running more than one line is our
+    proxy for someone who put thought into it, so it spares their review the same
+    way a commit does. Only comments left inside the date window count, since the
+    report credits work done in this period. And only real issue comments qualify:
+    a review's body (including the message typed when approving) lives on the
+    reviews endpoint, not this one, so an approval note is never mistaken for a
+    standalone comment.
+    """
+    repo = item["repository"]["nameWithOwner"]
+    number = item["number"]
+    comments = _fetch_all_pages(f"repos/{repo}/issues/{number}/comments")
+    commenters = set()
+    for comment in comments:
+        created = comment.get("created_at")
+        if not created or not (since <= parse_datetime(created) <= until):
+            continue
+        body = comment.get("body") or ""
+        # More than one non-blank line is our "they wrote something real" bar.
+        if len([line for line in body.splitlines() if line.strip()]) > 1:
+            login = (comment.get("user") or {}).get("login")
+            if login:
+                commenters.add(login.lower())
+    return commenters
+
+
 def fetch_additional_interactions(item: dict, username: str, since: datetime, until: datetime) -> tuple[list[str], Optional[datetime], Optional[tuple[datetime, str]]]:
     """Fetch additional interaction details from API (comments, reviews) with timestamps.
 
@@ -544,26 +616,62 @@ def format_table_row(item: dict, reason: Optional[str] = None) -> str:
     return row
 
 
-def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime, end_dt: datetime) -> dict:
-    """Process an item for multiple users and combine their interactions."""
+def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime, end_dt: datetime, filter_renovate: bool = False) -> dict:
+    """Process an item for multiple users and combine their interactions.
+
+    Under filter_renovate, a Renovate-authored PR contributes a user's review or
+    comment only when they did real work on it within the window: pushed a commit
+    of their own or left a multi-line comment. A drive-by review with neither is
+    dropped so it neither shows nor counts. We gather the PR's in-window real
+    workers once and reuse the set across every user on the item.
+    """
     all_interactions = []
     latest_interaction = None
     latest_any: Optional[tuple[datetime, str]] = None
+
+    renovate_pr = filter_renovate and is_renovate_pr(item)
+    # Logins that did real work on this bump PR: authored a commit or left a
+    # multi-line comment. Fetched lazily in the loop below, only once a user
+    # actually has an active interaction to weigh, so a bump PR that nobody
+    # reviewed costs no commits lookup. Cached across users after the first.
+    real_workers: Optional[set[str]] = None
+    # Tagged interactions dropped as drive-by Renovate reviews. Kept aside so the
+    # filtered section can still name who reviewed even though it doesn't count;
+    # fetch_activity surfaces these for display only.
+    renovate_skipped_interactions: list[str] = []
+
     for username in item.get("_usernames", []):
         processed = process_item(item.copy(), username, since_dt, end_dt)
         interactions = processed.get("_interactions", [])
         item_latest = processed.get("_latest_interaction")
         item_any = processed.get("_latest_any")
-        # Tag interactions with username if multiple users
+
+        # Tag each interaction with its user when several are in play, so both
+        # the active tables and the filtered reasons can name who acted.
         if len(usernames) > 1:
-            for interaction in interactions:
-                tagged = f"{interaction} (@{username})"
-                if tagged not in all_interactions:
-                    all_interactions.append(tagged)
+            tagged_interactions = [f"{interaction} (@{username})" for interaction in interactions]
         else:
-            for interaction in interactions:
-                if interaction not in all_interactions:
-                    all_interactions.append(interaction)
+            tagged_interactions = list(interactions)
+
+        # Renovate escape hatch: if this user's only stake in the bump PR is a
+        # drive-by review or one-line comment (no real work), drop their
+        # contribution so it neither counts nor lands in the active tables. We
+        # still stash the tagged interactions so --show-filtered can name the
+        # reviewer. Passive-only involvement carries no active base and falls
+        # through to the normal passive filter below.
+        active_bases = {parse_interaction(i)[0] for i in interactions} - PASSIVE_INTERACTION_TYPES
+        if renovate_pr and active_bases:
+            if real_workers is None:  # first user who actively engaged this PR
+                real_workers = fetch_commit_authors(item, since_dt, end_dt) | fetch_substantive_commenters(item, since_dt, end_dt)
+            if username.lower() not in real_workers:
+                for tagged in tagged_interactions:
+                    if tagged not in renovate_skipped_interactions:
+                        renovate_skipped_interactions.append(tagged)
+                continue
+
+        for tagged in tagged_interactions:
+            if tagged not in all_interactions:
+                all_interactions.append(tagged)
         if item_latest and (latest_interaction is None or item_latest > latest_interaction):
             latest_interaction = item_latest
         # Merge each user's any-date activity, tagging the description with the
@@ -576,6 +684,8 @@ def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime,
     item["_interactions"] = all_interactions
     item["_latest_interaction"] = latest_interaction
     item["_latest_any"] = latest_any
+    if renovate_skipped_interactions:
+        item["_renovate_skipped_interactions"] = renovate_skipped_interactions
     return item
 
 
@@ -625,6 +735,10 @@ def derive_filter_reason(item: dict, base_interactions: set[str], since_dt: date
     they acted but every action fell outside the window; they're only an
     assignee; or the involves search matched them with nothing attributable.
     """
+    # A dropped Renovate review is the most specific reason we have, so it wins
+    # over the window/passive explanations below.
+    if item.get("_renovate_skipped_interactions"):
+        return "Renovate dependency bump (no commit or multi-line comment)"
     latest_any = item.get("_latest_any")
     if latest_any is not None:
         # They did actively engage, just never inside the window: an in-window
@@ -643,7 +757,8 @@ def fetch_activity(
     orgs: list[str],
     since_dt: datetime,
     end_dt: datetime,
-    debug: bool = False
+    debug: bool = False,
+    filter_renovate: bool = False
 ) -> FetchResult:
     """Fetch and process GitHub activity for given users and orgs.
 
@@ -653,6 +768,8 @@ def fetch_activity(
         since_dt: Start of time period
         end_dt: End of time period
         debug: If True, print progress messages
+        filter_renovate: If True, drop drive-by contributions to Renovate bot
+            PRs unless the user pushed a commit or left a multi-line comment
 
     Returns: FetchResult with active_items, filtered_items, and user_stats
     """
@@ -700,7 +817,7 @@ def fetch_activity(
     # Process items in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(process_item_for_users, item, usernames, since_dt, end_dt): item
+            executor.submit(process_item_for_users, item, usernames, since_dt, end_dt, filter_renovate): item
             for item in items_list
         }
         processed_items = []
@@ -725,6 +842,13 @@ def fetch_activity(
             active_items.append(item)
         else:
             item["_filter_reason"] = derive_filter_reason(item, base_interactions, since_dt, end_dt)
+            # A drive-by Renovate review leaves _interactions empty (the review
+            # was dropped from the active tally). Surface the stashed reviewer(s)
+            # here so the filtered table names who did it. Display-only: the item
+            # is already classified filtered and stats run on active_items, so
+            # this can't resurrect the interaction or inflate any count.
+            if not item["_interactions"] and item.get("_renovate_skipped_interactions"):
+                item["_interactions"] = item["_renovate_skipped_interactions"]
             filtered_items.append(item)
 
     # Sort by latest user interaction descending
@@ -771,6 +895,12 @@ def parse_arguments() -> argparse.Namespace:
         "--show-filtered",
         action="store_true",
         help="Show filtered out items in a separate section"
+    )
+    parser.add_argument(
+        "--filter-renovate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Filter out drive-by reviews on Renovate bot PRs, kept only if the user pushed a commit or left a multi-line comment (default: on; use --no-filter-renovate to disable)"
     )
     parser.add_argument(
         "--debug",
@@ -824,7 +954,7 @@ def print_detailed_results(
         print(f"\n## Active Participation\n")
         print(f"Found {len(active_items)} issues/PRs with active participation across {len(by_repo)} repositories")
         if filtered_items:
-            print(f"(filtered out {len(filtered_items)} items with only passive/old interactions)\n")
+            print(f"(filtered out {len(filtered_items)} items with only passive, out-of-window, or Renovate-bump interactions)\n")
 
         for repo_name in sorted(by_repo.keys()):
             repo_items = by_repo[repo_name]
@@ -838,7 +968,7 @@ def print_detailed_results(
         print(f"\n## Active Participation\n")
         print(f"Found {len(active_items)} unique issues/PRs with active participation")
         if filtered_items:
-            print(f"(filtered out {len(filtered_items)} items with only passive/old interactions)\n")
+            print(f"(filtered out {len(filtered_items)} items with only passive, out-of-window, or Renovate-bump interactions)\n")
 
         for username in usernames:
             # Filter items for this user with active interactions
@@ -937,7 +1067,7 @@ def print_summary_table(user_stats: dict[str, UserStats]) -> None:
 def print_filtered_items(filtered_items: list[dict]) -> None:
     """Print the filtered items section."""
     print(f"\n## Filtered Out ({len(filtered_items)} items)\n")
-    print("Items where the user had no active participation (author, commenter, or reviewer) inside the date range. The Reason column explains each exclusion:\n")
+    print("Items excluded from the active results. The Reason column explains each exclusion:\n")
 
     # Group filtered by repository
     filtered_by_repo = group_by_repository(filtered_items)
@@ -967,7 +1097,7 @@ def main() -> None:
     usernames, orgs = parse_user_inputs(args)
 
     # Fetch activity
-    result = fetch_activity(usernames, orgs, since_dt, end_dt, debug=args.debug)
+    result = fetch_activity(usernames, orgs, since_dt, end_dt, debug=args.debug, filter_renovate=args.filter_renovate)
 
     if not result.active_items and not result.filtered_items:
         print("No activity found.")
