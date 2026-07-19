@@ -1096,6 +1096,11 @@ def main() -> None:
     since_dt, end_dt = calculate_date_range(args)
     usernames, orgs = parse_user_inputs(args)
 
+    # State the window before the slow query, so the report is self-describing
+    # and the user sees the range right away while the fetch runs. flush so it
+    # lands immediately rather than waiting on stdout buffering.
+    print(f"# GitHub Activity: {since_dt:%Y-%m-%d} to {end_dt:%Y-%m-%d}", flush=True)
+
     # Fetch activity
     result = fetch_activity(usernames, orgs, since_dt, end_dt, debug=args.debug, filter_renovate=args.filter_renovate)
 
