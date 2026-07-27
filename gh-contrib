@@ -781,14 +781,16 @@ def fetch_activity(
         users_str = ", ".join(f"@{u}" for u in usernames)
         print(f"Fetching GitHub activity for {users_str} in {orgs_str} from {since_date} to {end_date}...\n")
 
-    # Fetch items from all orgs and users
+    # We don't include the end_date in the query here, because that would filter items that were
+    # touched again after the window closed but still had activity within the window. We'll filter
+    # out activity after the end_date during enrichment later.
     all_items: dict[str, dict] = {}
     for org in orgs:
         for username in usernames:
             items = gh_search([
                 "--involves", username,
                 "--owner", org,
-                "--updated", f"{since_date}..{end_date}"
+                "--updated", f">={since_date}"
             ])
 
             # Warn if search results hit the limit
