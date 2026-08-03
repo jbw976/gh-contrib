@@ -52,7 +52,7 @@ Results are grouped by repository and displayed in markdown tables, with a summa
 
 By default, reviews and approvals of [Renovate](https://github.com/apps/renovate) dependency-bump PRs are filtered out, so rubber-stamping a stream of automated bumps doesn't inflate a contributor's numbers. A review is kept only when the contributor did real work on the PR: pushed a commit of their own, or left a comment longer than one line. The message typed into a review approval doesn't count as a comment here. Only standalone PR comments do.
 
-Renovate PRs are spotted by their author (`renovate[bot]`) at no extra API cost. Pass `--no-filter-renovate` to turn the filter off and count every Renovate review.
+Renovate PRs are spotted by their author at no extra API cost. Any author whose name mentions Renovate counts, so an org that self-hosts Renovate as its own GitHub App (`crossplane-renovate[bot]`) is covered alongside the shared `renovate[bot]`. Pass `--no-filter-renovate` to turn the filter off and count every Renovate review.
 
 ## How It Works
 

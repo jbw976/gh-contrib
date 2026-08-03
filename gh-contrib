@@ -32,12 +32,6 @@ SUBPROCESS_TIMEOUT = 30  # seconds
 MAX_PAGINATION_PAGES = 10  # Safety limit for pagination
 PASSIVE_INTERACTION_TYPES = frozenset({"review-requested", "assignee", "mentioned"})
 
-# PR authors we treat as dependency-bump bots. Under --filter-renovate, a
-# contributor's review or comment on one of these PRs is filtered out unless they
-# did real work on it: pushed a commit or left a multi-line comment (see
-# fetch_commit_authors and fetch_substantive_commenters).
-BOT_PR_AUTHORS = frozenset({"renovate[bot]"})
-
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1.0  # seconds
@@ -139,15 +133,19 @@ def is_pull_request(item: dict) -> bool:
 
 
 def is_renovate_pr(item: dict) -> bool:
-    """Report whether this PR was opened by a dependency-bump bot (e.g. Renovate).
+    """Report whether this PR was opened by Renovate.
 
     Keys off the PR author login already in the search results, so it costs no
-    API call. Issues are never bumps, so non-PRs are always False.
+    API call. Under --filter-renovate, a contributor's review or comment on one
+    of these PRs is dropped unless they did real work on it: pushed a commit or
+    left a multi-line comment (see fetch_commit_authors and
+    fetch_substantive_commenters). Issues are never bumps, so non-PRs are always
+    False.
     """
     if not is_pull_request(item):
         return False
     author = (item.get("author") or {}).get("login", "")
-    return author.lower() in BOT_PR_AUTHORS
+    return "renovate" in author.lower()
 
 
 def parse_interaction(interaction: str, default_username: Optional[str] = None) -> tuple[str, Optional[str]]:
