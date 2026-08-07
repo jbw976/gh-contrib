@@ -1022,8 +1022,14 @@ def print_summary_table(user_stats: dict[str, UserStats]) -> None:
         reverse=True
     )
 
+    # The totals row label sits in the username column, so it has to be part of
+    # that column's width or ljust() silently overflows the cell and shifts
+    # every pipe after it.
+    total_label = "**Total**"
+
     # Calculate column widths
     col_widths = [len(h) for h in headers]
+    col_widths[0] = max(col_widths[0], len(total_label))
     for username, stats in sorted_users:
         values = [username] + [str(v) for v in stats.as_list()] + [str(stats.total())]
         col_widths = [max(cw, len(val)) for cw, val in zip(col_widths, values)]
@@ -1057,7 +1063,7 @@ def print_summary_table(user_stats: dict[str, UserStats]) -> None:
 
         # Print totals row, including a grand total (sum of all totals)
         grand_total = sum(totals)
-        total_values = ["**Total**"] + [str(v) for v in totals] + [str(grand_total)]
+        total_values = [total_label] + [str(v) for v in totals] + [str(grand_total)]
         formatted_totals = [total_values[0].ljust(col_widths[0])]  # Label left-aligned
         formatted_totals += [v.rjust(w) for v, w in zip(total_values[1:], col_widths[1:])]  # Numbers right-aligned
         total_row = "| " + " | ".join(formatted_totals) + " |"
