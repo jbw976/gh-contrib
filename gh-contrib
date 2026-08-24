@@ -916,7 +916,11 @@ def calculate_date_range(args: argparse.Namespace) -> tuple[datetime, datetime]:
         return get_last_complete_week()
     elif args.end_date:
         end_dt = args.end_date.replace(hour=23, minute=59, second=59)
-        since_dt = end_dt - timedelta(days=args.days)
+        # --days counts calendar days inclusive of --end-date, so a 7-day window
+        # ending 08-16 runs from 08-10 00:00, the same shape as --last-week.
+        since_dt = (end_dt - timedelta(days=args.days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         return since_dt, end_dt
     else:
         end_dt = datetime.now(timezone.utc)
