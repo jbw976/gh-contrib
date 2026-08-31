@@ -216,7 +216,8 @@ def gh_api(endpoint: str) -> Optional[list | dict]:
     Retries on rate limits, server errors (502, 503, 504), and timeouts.
     Returns the parsed JSON response, or None on error. Every giving-up path
     records the failure via _record_api_failure so the run can be flagged as
-    degraded rather than silently undercount; see main().
+    degraded rather than silently undercount; see main(). A 404 is the one
+    error that isn't a failure: it returns an empty list.
     """
     cmd = ["gh", "api", endpoint]
     delay = INITIAL_RETRY_DELAY
@@ -235,6 +236,17 @@ def gh_api(endpoint: str) -> Optional[list | dict]:
             return None
         except subprocess.CalledProcessError as e:
             stderr_lower = e.stderr.lower() if e.stderr else ""
+
+            # A 404 is a definitive answer, not a failed fetch, so we report it
+            # as empty instead of degrading the run. GitHub 404s the whole
+            # /issues/* namespace on a repo with Issues disabled, which is how
+            # the private forks behind security advisories are set up, so a PR's
+            # comments 404 there while /pulls/* reads fine. Returning [] rather
+            # than None also lets the cache keep it, sparing every other user on
+            # the item a repeat ask.
+            if "http 404" in stderr_lower:
+                return []
+
             is_retryable = any(err in stderr_lower for err in RETRYABLE_ERRORS)
 
             if is_retryable and attempt < MAX_RETRIES:
