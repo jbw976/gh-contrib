@@ -1138,9 +1138,8 @@ def main() -> None:
             "the numbers above may undercount activity. Re-run to get complete counts.",
             file=sys.stderr,
         )
-        if args.debug:
-            for failure in _api_failures:
-                print(f"  failed: {failure}", file=sys.stderr)
+        for failure in _api_failures:
+            print(f"  failed: {failure}", file=sys.stderr)
         sys.exit(1)
 
 
