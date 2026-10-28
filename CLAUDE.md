@@ -98,7 +98,7 @@ Markdown tables include:
 - Title (truncated to 60 chars)
 - Interactions (comma-separated list)
 
-Summary section shows PR/Issue count breakdown and interaction type frequency.
+Summary section shows per-user PR/Issue counts. Each item counts once per user, under their strongest interaction on it (author, then reviewer, then commenter), so the columns don't overlap and the total is the number of distinct items.
 
 ## Health Stats Mode
 

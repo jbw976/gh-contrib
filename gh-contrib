@@ -702,6 +702,12 @@ def process_item_for_users(item: dict, usernames: list[str], since_dt: datetime,
 def compute_user_stats(active_items: list[dict], usernames: list[str]) -> dict[str, UserStats]:
     """Compute user statistics from processed active items.
 
+    Each item counts once per user, under the strongest thing they did on it:
+    author, then reviewer, then commenter. A user's comments on a PR they also
+    reviewed or authored are part of that same work, so they don't earn a second
+    credit. This keeps the columns from overlapping, so a user's total is the
+    number of distinct items they were active on.
+
     Args:
         active_items: List of processed items with _interactions
         usernames: List of usernames to compute stats for
@@ -711,6 +717,8 @@ def compute_user_stats(active_items: list[dict], usernames: list[str]) -> dict[s
     user_stats: dict[str, UserStats] = {username: UserStats() for username in usernames}
 
     for item in active_items:
+        # Gather each user's interaction types on this item before crediting any
+        bases_by_user: dict[str, set[str]] = {}
         for interaction in item.get("_interactions", []):
             base_interaction, username = parse_interaction(
                 interaction,
@@ -718,17 +726,20 @@ def compute_user_stats(active_items: list[dict], usernames: list[str]) -> dict[s
             )
             if username is None:
                 continue
+            bases_by_user.setdefault(username, set()).add(base_interaction)
+
+        for username, bases in bases_by_user.items():
             if username not in user_stats:
                 user_stats[username] = UserStats()
 
-            if base_interaction == "author":
+            if "author" in bases:
                 if is_pull_request(item):
                     user_stats[username].prs_authored += 1
                 else:
                     user_stats[username].issues_authored += 1
-            elif base_interaction == "reviewer" and is_pull_request(item):
+            elif "reviewer" in bases and is_pull_request(item):
                 user_stats[username].prs_reviewed += 1
-            elif base_interaction == "commenter":
+            elif "commenter" in bases:
                 if is_pull_request(item):
                     user_stats[username].prs_commented += 1
                 else:

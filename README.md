@@ -48,6 +48,8 @@ Results are grouped by repository and displayed in markdown tables, with a summa
 - PRs authored, reviewed, commented
 - Issues authored, commented
 
+Each PR or issue counts once per user, under the strongest thing they did on it: authored, then reviewed, then commented. A PR a user reviewed and also commented on counts as reviewed, and comments on their own PR don't add a second count. The total is the number of distinct PRs and issues each user was active on.
+
 ## Filtering Renovate PRs
 
 By default, reviews and approvals of [Renovate](https://github.com/apps/renovate) dependency-bump PRs are filtered out, so rubber-stamping a stream of automated bumps doesn't inflate a contributor's numbers. A review is kept only when the contributor did real work on the PR: pushed a commit of their own, or left a comment longer than one line. The message typed into a review approval doesn't count as a comment here. Only standalone PR comments do.
