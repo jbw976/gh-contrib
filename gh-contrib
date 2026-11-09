@@ -35,6 +35,9 @@ PASSIVE_INTERACTION_TYPES = frozenset({"review-requested", "assignee", "mentione
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1.0  # seconds
+# GitHub asks for at least a minute before retrying a rate-limited request
+# that came back without a retry-after header, which is all gh search shows us.
+RATE_LIMIT_RETRY_DELAY = 60.0  # seconds
 BACKOFF_FACTOR = 2.0
 RETRYABLE_ERRORS = frozenset({"rate limit", "502", "503", "504", "timeout"})
 
@@ -175,25 +178,54 @@ def group_by_repository(items: list[dict]) -> dict[str, list[dict]]:
 
 
 def gh_search(args: list[str]) -> list[dict]:
-    """Execute a gh search command and return results."""
+    """Execute a gh search command and return results.
+
+    Retries on rate limits, server errors, and timeouts. A search that still
+    fails after its retries is recorded via _record_api_failure and returns an
+    empty list, so the searches that already succeeded aren't thrown away; main()
+    then flags the run as degraded.
+    """
     cmd = ["gh", "search", "issues"] + args + [
         "--include-prs",
         "--json", "url,title,state,repository,updatedAt,createdAt,author,assignees,isPullRequest,number",
         "--limit", str(SEARCH_LIMIT)
     ]
+    label = "search " + " ".join(args)
+    backoff = 1.0
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=SUBPROCESS_TIMEOUT)
-        return json.loads(result.stdout)
-    except subprocess.TimeoutExpired:
-        print(f"Error: gh search timed out after {SUBPROCESS_TIMEOUT}s", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"Error calling gh search: {e.stderr}", file=sys.stderr)
-        sys.exit(1)
-    except FileNotFoundError:
-        print("Error: gh CLI not found. Install from https://cli.github.com/", file=sys.stderr)
-        sys.exit(1)
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=SUBPROCESS_TIMEOUT)
+            return json.loads(result.stdout)
+        except subprocess.TimeoutExpired:
+            reason = f"timed out after {SUBPROCESS_TIMEOUT}s"
+            delay = INITIAL_RETRY_DELAY * backoff
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.strip() if e.stderr else "gh search error"
+            stderr_lower = stderr.lower()
+            if not any(err in stderr_lower for err in RETRYABLE_ERRORS):
+                _record_api_failure(label, stderr)
+                return []
+            if "rate limit" in stderr_lower:
+                reason = "rate limit"
+                delay = RATE_LIMIT_RETRY_DELAY * backoff
+            else:
+                reason = stderr
+                delay = INITIAL_RETRY_DELAY * backoff
+        except json.JSONDecodeError:
+            _record_api_failure(label, "invalid JSON in response")
+            return []
+        except FileNotFoundError:
+            print("Error: gh CLI not found. Install from https://cli.github.com/", file=sys.stderr)
+            sys.exit(1)
+
+        if attempt < MAX_RETRIES:
+            print(f"gh {label}: {reason}, retrying in {delay:.0f}s...", file=sys.stderr)
+            time.sleep(delay)
+            backoff *= BACKOFF_FACTOR
+
+    _record_api_failure(label, f"{reason}, gave up after {MAX_RETRIES} retries")
+    return []
 
 
 # Endpoints whose fetch failed after all retries. A non-empty list means the
